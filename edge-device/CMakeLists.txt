@@ -10,15 +10,19 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/tests/utils)
 
 # Monitoring library sources
 add_library(monitoring_lib
-	monitoring/resource_monitor.cpp
-	monitoring/audit_logger.cpp
-	monitoring/mock_fsm.cpp
-	tests/utils/stress_helper.cpp
+    monitoring/resource_monitor.cpp
+    monitoring/audit_logger.cpp
 )
 
 # Link OpenSSL for SHA-256 hashing (REQ-AUD-01)
 find_package(OpenSSL REQUIRED)
 target_link_libraries(monitoring_lib OpenSSL::SSL OpenSSL::Crypto)
+
+# Test utilities library
+add_library(test_utils_lib
+    tests/utils/stress_helper.cpp
+    tests/utils/mock_fsm.cpp
+)
 
 # Unit test executable
 add_executable(test_monitoring tests/test_monitoring.cpp)
