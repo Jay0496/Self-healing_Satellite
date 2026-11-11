@@ -1,0 +1,15 @@
+# Build directories
+build/
+bin/
+obj/
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local log artifacts and test outputs
+audit_chain.log
+test_audit_chain.log
+*.log
