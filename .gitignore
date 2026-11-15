@@ -13,3 +13,8 @@ obj/
 audit_chain.log
 test_audit_chain.log
 *.log
+
+# Python tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
