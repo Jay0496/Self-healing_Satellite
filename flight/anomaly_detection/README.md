@@ -24,6 +24,7 @@ This module implements the **Phase 1 Edge Machine Learning Pipeline** (Concept 2
 flight/anomaly_detection/
 ├── README.md
 ├── edge_detector.py              # Runtime Raspberry Pi Stage 1 + Stage 2 inference wrapper
+├── benchmark_pi.py               # On-device Raspberry Pi T04 latency & RAM
 ├── artifacts/                    # Pre-trained INT8 model & runtime calibration constants
 │   ├── model_int8.tflite         # Quantized INT8 1D-CNN Autoencoder (25.9 KB)
 │   ├── scaler_params.json        # RobustScaler center/scale, feature order & training medians
@@ -52,7 +53,8 @@ Evaluated using the quantized `model_int8.tflite` interpreter against held-out n
 | **T03** | False Positive Rate (FPR) | **0.00%** | $< 3.00\%$ | **PASS** |
 | **T03** | Precision / Recall | **1.0000 / 0.8054** | Balanced event detection | **PASS** |
 | **Concept 5** | Stage 2 Top-1 Sensor Isolation Accuracy | **100.0%** | Granular subsystem triage | **PASS** |
-| **T04** | Inference Latency (`p50` / `p95` / `p99`) | **0.003 / 0.004 / 0.004 ms** | $\le 100\text{ ms}$ per window | **PASS** |
+| **T04** | Raspberry Pi Inference Latency (`p50` / `p95` / `p99`) | **0.070 / 0.074 / 0.084 ms** (Max: `0.454 ms`) | $\le 100\text{ ms}$ per window | **PASS** |
+| **T04** | Raspberry Pi Runtime RAM Footprint | **39.17 MB** (`+2.95 MB` model overhead) | Fits edge SBC RAM budget | **PASS** |
 
 ---
 
@@ -61,8 +63,11 @@ Evaluated using the quantized `model_int8.tflite` interpreter against held-out n
 ### Dependencies
 On the Raspberry Pi (ARM64), lightweight TFLite runtime packages are sufficient (full `tensorflow` is not required):
 ```bash
-pip install numpy ai-edge-litert
-# Or fallback: pip install numpy tflite-runtime
+pip install numpy ai-edge-litert psutil
+# Or fallback: pip install numpy tflite-runtime psutil
+
+# Run on-device T04 latency & RAM verification
+python flight/anomaly_detection/benchmark_pi.py
 ```
 
 ### Usage in the Flight MQTT / FSM Loop
