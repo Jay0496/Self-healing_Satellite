@@ -1,6 +1,7 @@
 """Deterministic synthetic sensor telemetry shaped by OPS-SAT UHF samples."""
 
 from __future__ import annotations
+from simulator.fault_injector import ContinuousFaultInjector
 
 import bisect
 import csv
@@ -213,6 +214,7 @@ class TelemetryGenerator:
         }
         self._angles = [0.0, 0.0, 0.0]
         self._tick = 0
+        self.fault_injector = ContinuousFaultInjector(probability=0.05)
 
     def _template_value(self, channel: str, tick: int) -> float | None:
         template = self.templates.get(channel)
@@ -461,7 +463,10 @@ class TelemetryGenerator:
                         provenance="derived",
                     )
                 )
-
+        records = self.fault_injector.inject_records(records)
+        print(f"\n--- Frame Tick: {tick} | Time: {timestamp} ---")
+        for record in records:
+            print(f"{record.signal: <15}: {record.value:>8.2f} {record.unit}")
         return TelemetryFrame(tick=tick, measurement_time=timestamp, records=tuple(records))
 
     def frames(self, count: int | None = None) -> Iterator[TelemetryFrame]:

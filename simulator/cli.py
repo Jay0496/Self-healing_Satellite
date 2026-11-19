@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .generation import GeneratorConfig, TelemetryGenerator
 from .mqtt import MqttConfig, create_paho_publisher
-from .pipeline import IdentityTransform, select_records, transform_frame
+from .pipeline import select_records
 
 
 def _default_csv_path() -> Path:
@@ -96,12 +96,10 @@ def main(argv: list[str] | None = None) -> int:
                 start_time=args.start_time,
             ),
         )
-        transformer = IdentityTransform()
 
         if args.dry_run:
             for frame in generator.frames(count):
-                transformed = transform_frame(frame, transformer)
-                for record in select_records(transformed, selected_signals):
+                for record in select_records(frame, selected_signals):
                     print(record.to_json())
             return 0
 
@@ -125,8 +123,7 @@ def main(argv: list[str] | None = None) -> int:
                 delay = due - time.monotonic()
                 if delay > 0:
                     time.sleep(delay)
-                ready = transform_frame(frame, transformer)
-                for record in select_records(ready, selected_signals):
+                for record in select_records(frame, selected_signals):
                     publisher.publish(record)
                     published += 1
         except KeyboardInterrupt:
