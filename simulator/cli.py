@@ -1,7 +1,6 @@
 """Command-line entry point for generated telemetry and flight MQTT streaming."""
 
 from __future__ import annotations
-from .fault_injection.transforms import SpikeFaultTransform
 
 import argparse
 import json
@@ -13,7 +12,7 @@ from pathlib import Path
 
 from .generation import GeneratorConfig, TelemetryGenerator
 from .mqtt import MqttConfig, create_paho_publisher
-from .pipeline import IdentityTransform, select_records, transform_frame
+from .pipeline import select_records
 
 
 def _default_csv_path() -> Path:
@@ -57,12 +56,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--mqtt-client-id", default=os.getenv("SIMULATOR_MQTT_CLIENT_ID", "satellite-simulator"))
     parser.add_argument("--mqtt-username", default=os.getenv("SIMULATOR_MQTT_USERNAME"))
     parser.add_argument("--mqtt-password", default=os.getenv("SIMULATOR_MQTT_PASSWORD"))
-    parser.add_argument(
-        "--fault",
-        default=None,
-        choices=["voltage_spike", "temp_spike"],
-        help="Apply a predefined fault injection transform to the telemetry stream."
-    )
     return parser
 
 
@@ -103,16 +96,10 @@ def main(argv: list[str] | None = None) -> int:
                 start_time=args.start_time,
             ),
         )
-        if args.fault == "voltage_spike":
-            transformer = SpikeFaultTransform(target_signal="bus_voltage_v", max_multiplier=1.8)
-        elif args.fault == "temp_spike":
-            transformer = SpikeFaultTransform(target_signal="temperature_c", max_multiplier=2.5)
-        else:
-            transformer = IdentityTransform()
+
         if args.dry_run:
             for frame in generator.frames(count):
-                transformed = transform_frame(frame, transformer)
-                for record in select_records(transformed, selected_signals):
+                for record in select_records(frame, selected_signals):
                     print(record.to_json())
             return 0
 
@@ -136,8 +123,7 @@ def main(argv: list[str] | None = None) -> int:
                 delay = due - time.monotonic()
                 if delay > 0:
                     time.sleep(delay)
-                ready = transform_frame(frame, transformer)
-                for record in select_records(ready, selected_signals):
+                for record in select_records(frame, selected_signals):
                     publisher.publish(record)
                     published += 1
         except KeyboardInterrupt:
