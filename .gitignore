@@ -18,3 +18,11 @@ test_audit_chain.log
 __pycache__/
 *.py[cod]
 .pytest_cache/
+# macOS & Python
+.DS_Store
+venv/
+*.pyc
+
+# Raw & intermediate telemetry datasets
+flight/anomaly_detection/data/*.csv
+flight/anomaly_detection/data/*.npz
