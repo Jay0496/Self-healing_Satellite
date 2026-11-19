@@ -1,0 +1,25 @@
+# Build directories
+build/
+bin/
+obj/
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local log artifacts and test outputs
+audit_chain.log
+test_audit_chain.log
+*.log
+
+# macOS & Python
+.DS_Store
+venv/
+__pycache__/
+*.pyc
+
+# Raw & intermediate telemetry datasets
+flight/anomaly_detection/data/*.csv
+flight/anomaly_detection/data/*.npz
