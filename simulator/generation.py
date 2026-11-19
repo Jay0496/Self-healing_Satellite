@@ -532,16 +532,26 @@ class TelemetryGenerator:
         self._angles = [0.0, 0.0, 0.0]
         self._tick = 0
 
+        
         self.fault_injector = ContinuousFaultInjector(
-            probability=(
-                0.0 if self.config.demo_fault else 0.05
-            ),
-            seed=self.config.seed + 1001,
-            demo_fault_start_tick=(
-                15 if self.config.demo_fault else None
-            ),
-            demo_fault_duration_ticks=14,
+    # Keep the original 14-channel nominal tests fault-free.
+    # Allow random faults in model13 mode unless the
+    # deterministic demo fault has been enabled.
+    probability=(
+        0.05
+        if (
+            self.config.output_profile == "model13"
+            and not self.config.demo_fault
         )
+        else 0.0
+    ),
+    seed=self.config.seed + 1001,
+    demo_fault_start_tick=(
+        15 if self.config.demo_fault else None
+    ),
+    demo_fault_duration_ticks=14,
+)
+
 
         # Independent RNG for each AI model channel.
         self._model_rng = {
