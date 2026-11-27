@@ -26,3 +26,16 @@ venv/
 # Raw & intermediate telemetry datasets
 flight/anomaly_detection/data/*.csv
 flight/anomaly_detection/data/*.npz
+
+# Local environments, demo databases and private datasets
+.venv/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+docs/uhf_telemetry.csv
+
+# Key material must never be committed (REQ-SEC-02); keys live in ~/.g29_secrets
+.g29_secrets/
+*.key
+*.pem
+*.manifest.json
