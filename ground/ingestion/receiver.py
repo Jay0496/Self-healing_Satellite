@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from ground.storage.audit_store import GroundAuditStore
 from shared.security import KeyMaterialError, SecurityError, open_channel
 
 
@@ -94,6 +95,7 @@ def main():
         print(f'[GROUND] SECURITY key material unavailable: {exc}', flush=True)
         return 2
     store = GroundStore(args.db)
+    audit_store = GroundAuditStore(args.db)
 
     class Handler(BaseHTTPRequestHandler):
         def reply(self, status: int, data: dict, sealed: bool = False):
@@ -108,12 +110,15 @@ def main():
         def do_GET(self):
             if self.path == '/status':
                 self.reply(200, {'received_records': store.count(),
-                                 'received_events': store.count_events()})
+                                 'received_events': store.count_events(),
+                                 'received_audit_entries': audit_store.count(),
+                                 'audit_chains': {c: audit_store.verify_chain(c)['ok']
+                                                  for c in audit_store.chains()}})
             else:
                 self.reply(404, {'error': 'Unknown endpoint'})
 
         def do_POST(self):
-            if self.path not in ('/ingest', '/ingest-events'):
+            if self.path not in ('/ingest', '/ingest-events', '/ingest-audit'):
                 self.reply(404, {'error': 'Unknown endpoint'})
                 return
             try:
@@ -135,6 +140,15 @@ def main():
                     ids = store.ingest(records)
                     print(f'[GROUND] Accepted telemetry={len(ids)} total_unique={store.count()}', flush=True)
                     self.reply(200, {'acknowledged_ids': ids}, sealed=True)
+                elif self.path == '/ingest-audit':
+                    entries = payload.get('entries')
+                    if not isinstance(entries, list) or not 0 < len(entries) <= 100:
+                        raise ValueError('Expected 1 to 100 audit entries')
+                    ids = audit_store.ingest(entries)
+                    while audit_store.alerts:
+                        print(f'[GROUND] AUDIT INTEGRITY ALERT {audit_store.alerts.pop(0)}', flush=True)
+                    print(f'[GROUND] Accepted audit={len(ids)} total_unique={audit_store.count()}', flush=True)
+                    self.reply(200, {'acknowledged_entry_uids': ids}, sealed=True)
                 else:
                     events = payload.get('events')
                     if not isinstance(events, list) or not 0 < len(events) <= 100:

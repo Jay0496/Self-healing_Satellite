@@ -13,6 +13,9 @@ from uuid import uuid4
 
 import paho.mqtt.client as mqtt
 
+from pathlib import Path
+
+from shared.audit import AuditLog
 from shared.mqtt_protocol import ALLOWED_COMMANDS, topics
 from shared.security import KeyMaterialError, SecurityError, open_channel
 from shared.security.keystore import load_signing_key
@@ -28,6 +31,8 @@ def main() -> int:
     p.add_argument('--timeout', type=float, default=15)
     p.add_argument('--operator', default='ground-operator', help='Operator name recorded in the command')
     p.add_argument('--secrets', default=None, help='Key directory (default $G29_SECRETS_DIR or ~/.g29_secrets)')
+    p.add_argument('--operator-audit', type=Path, default=Path('ground/storage/operator_audit.sqlite3'),
+                   help='Ground operator audit chain that records every command sent')
     args = p.parse_args()
     tm = topics(args.topic_prefix)
     try:
@@ -54,6 +59,8 @@ def main() -> int:
                                  'expires_at': time.time() + min(args.timeout, 30),
                                  'issued_by': args.operator}, signing_key)
         c.publish(tm['command'], channel.seal_json(tm['command'], command), qos=1, retain=False)
+        operator_audit.append('COMMAND_SENT', {'command_id': cid, 'type': args.command,
+                                               'issued_by': args.operator})
         print(f'[GROUND COMMAND] Sent signed+encrypted {args.command}, id={cid}', flush=True)
 
     def on_message(c, userdata, msg):
@@ -66,6 +73,7 @@ def main() -> int:
             result.update(data)
             done.set()
 
+    operator_audit = AuditLog(args.operator_audit, chain_prefix='ground', actor=f'operator:{args.operator}'[:64])
     client.on_connect = on_connect
     client.on_subscribe = on_subscribe
     client.on_message = on_message
@@ -78,12 +86,16 @@ def main() -> int:
     try:
         if not done.wait(args.timeout):
             print('[GROUND COMMAND] No response (blackout/offline or connection issue).', flush=True)
+            operator_audit.append('COMMAND_RESULT', {'command_id': cid, 'status': 'NO_RESPONSE'})
             return 1
+        operator_audit.append('COMMAND_RESULT', {'command_id': cid, 'status': result.get('status'),
+                                                 'reason': result.get('reason')})
         print(json.dumps(result, indent=2, ensure_ascii=False), flush=True)
         return 0 if result.get('status') == 'SUCCESS' else 1
     finally:
         client.disconnect()
         client.loop_stop()
+        operator_audit.close()
 
 
 if __name__ == '__main__':

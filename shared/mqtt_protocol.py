@@ -15,6 +15,7 @@ def topics(prefix: str = DEFAULT_PREFIX) -> dict[str, str]:
     return {
         'telemetry': f'{prefix}/downlink/telemetry',
         'events': f'{prefix}/downlink/events',
+        'audit': f'{prefix}/downlink/audit',
         'ack': f'{prefix}/uplink/ack',
         'command': f'{prefix}/uplink/command',
         'result': f'{prefix}/downlink/command-result',

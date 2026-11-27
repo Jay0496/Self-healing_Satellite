@@ -4,6 +4,8 @@ Simulator -> local MQTT broker -> collector -> local SQLite -> ground HTTP.
 Ground blackout does not interrupt local MQTT, storage, or Pi remote access.
 Every HTTP request body and ground response is an AES-256-GCM sealed envelope bound to the
 endpoint path, with replay rejection (REQ-SEC-01). See docs/SECURITY.md.
+Link-state changes are also appended to the flight hash-chained audit log and forwarded to
+/ingest-audit after a blackout, like the MQTT path (REQ-AUD-01).
 """
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ from pathlib import Path
 import paho.mqtt.client as mqtt
 
 from flight.storage.buffer import TelemetryBuffer
+from shared.audit import AuditLog
 from shared.protocol import TelemetryRecord
 from shared.security import KeyMaterialError, open_channel
 from simulator.link.blackout import BlackoutWindow
@@ -39,6 +42,9 @@ def main():
         print(f'[FLIGHT] SECURITY key material unavailable: {exc}', flush=True)
         return 2
     events_url = args.ground_url.rsplit('/', 1)[0] + '/ingest-events'
+    audit_url = args.ground_url.rsplit('/', 1)[0] + '/ingest-audit'
+    audit = AuditLog(args.db, chain_prefix='pi01', actor='flight-agent-http')
+    audit.append('AGENT_START', {'transport': 'http', 'ground_url': args.ground_url})
     window = BlackoutWindow(args.blackout_after, args.blackout_duration)
     db = TelemetryBuffer(args.db)
     start_lock = threading.Lock()
@@ -108,7 +114,7 @@ def main():
                 continue
             elapsed = now - started
             telemetry_pending = db.counts()[1]
-            event_pending = db.event_counts()[1]
+            event_pending = db.event_counts()[1] + audit.counts()[1]
             if window.offline(elapsed):
                 next_state = 'BLACKOUT'
             elif state in ('BLACKOUT', 'RECOVERING') and (telemetry_pending or event_pending):
@@ -121,6 +127,7 @@ def main():
                            else 'Ground link restored; flushing buffered records and events' if state == 'RECOVERING'
                            else 'Ground link available')
                 db.event(state, message)
+                audit.append('LINK_STATE', {'to': state, 'note': message, 'elapsed_s': round(elapsed, 1)})
                 print(f'[FLIGHT] STATE={state} t={elapsed:.1f}s | {message}', flush=True)
 
             if state != 'BLACKOUT':
@@ -135,6 +142,11 @@ def main():
                         ack = submit_batch(events_url, 'events', events,
                                            'acknowledged_event_uids', 'event_uid')
                         db.acknowledge_events(ack)
+                    entries = audit.pending(100)
+                    if entries:
+                        ack = submit_batch(audit_url, 'entries', entries,
+                                           'acknowledged_entry_uids', 'entry_uid')
+                        audit.acknowledge(ack)
                 except (OSError, ValueError, urllib.error.HTTPError) as exc:
                     if now - last_error > 5:
                         last_error = now
@@ -153,6 +165,7 @@ def main():
         client.disconnect()
         client.loop_stop()
         db.close()
+        audit.close()
     return 0
 
 
