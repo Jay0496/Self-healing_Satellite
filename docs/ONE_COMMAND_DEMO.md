@@ -9,8 +9,12 @@ telemetry schemas, model inference, or the simulated blackout mechanism.
 - Raspberry Pi Mosquitto active and Tailscale Serve forwarding port 1883 to localhost.
 - Mac logged into the same Tailscale network; Pi Tailscale address `100.83.109.119`
   (change `--broker-host` if this address changes).
-- Mac has a working `.venv` with `paho-mqtt`; Pi `.venv` has `paho-mqtt`,
-  `numpy`, and `ai-edge-litert`.
+- Both `.venv`s: `python -m pip install -r requirements.txt` (adds `cryptography`).
+- **Link keys provisioned** (one-time, see [SECURITY.md](SECURITY.md#provisioning-once)):
+  run `python -m shared.security.keytool init` on the Mac and copy `link_master.key` and
+  `command_verify_ed25519.pem` to `~/.g29_secrets/` on the Pi. Both launchers refuse to
+  start without keys and print key fingerprints, which must match on both machines.
+  Optional: `export G29_KEY_ROTATION_SECONDS=30` on **both** machines to show key rotation.
 - Mac only: `docs/uhf_telemetry.csv` must exist locally. **Do not commit this CSV**.
 - On both machines, use the same Git branch/commit, preferably `main` after merge.
 
@@ -67,6 +71,11 @@ For the repeatable four-feature demo use the default `demo` mode.
 - The Mac ground receiver subscribes to `capstone/g29/pi01/downlink/#`, commits
   unique samples/events in SQLite and sends application ACKs to the Pi.
 - Pi final pending count should reach 0; Mac shows all 468 records and 4 link events.
+
+All downlink/uplink MQTT packets are AES-256-GCM encrypted and replay-protected, and
+ground commands are Ed25519-signed. `[SECURITY]` lines show rejections and key rotations.
+To demonstrate attacks being rejected, run `python scripts/security_attack_demo.py
+--broker-host <Pi address>` on the Mac while the link is ONLINE.
 
 **Limitations:** AI decisions currently print on the Pi only; no AI-event downlink,
 FSM-controlled recovery or physical RF link is included. The script consolidates
