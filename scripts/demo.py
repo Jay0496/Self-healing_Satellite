@@ -22,10 +22,30 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def log(tag: str, message: str) -> None:
     print(f"[{tag}] {message}", flush=True)
+
+
+def security_check(role: str) -> None:
+    """Fail fast (before starting any process) if this device lacks its link keys."""
+    from shared.security import keystore
+    try:
+        keystore.load_link_master_key()
+        if role == "pi":
+            keystore.load_verify_key()
+        else:
+            keystore.load_signing_key()
+        info = keystore.describe()
+        period = keystore.rotation_seconds()
+    except keystore.KeyMaterialError as exc:
+        raise RuntimeError(f"Security keys not provisioned: {exc}") from exc
+    log("SECURITY", f"AES-256-GCM link key fp={info[keystore.LINK_KEY_FILE]} "
+                    f"signing identity={info.get('signing_identity', 'missing')} rotation={period}s "
+                    "(fingerprints must match on Pi and Mac)")
 
 
 def broker_check(host: str, port: int) -> None:
@@ -121,6 +141,7 @@ def ground_report(path: Path, expected: int, min_events: int) -> bool:
 
 
 def pi_demo(args: argparse.Namespace) -> int:
+    security_check("pi")
     broker_check(args.mqtt_host, args.mqtt_port)
     filename = ROOT / "flight" / "storage" / f"demo_pi_{int(time.time())}.sqlite3"
     supervisor = Supervisor()
@@ -158,6 +179,8 @@ def pi_demo(args: argparse.Namespace) -> int:
                             if bucket != last_status_bucket:
                                 last_status_bucket = bucket
                                 log("PI STORAGE", line.removeprefix("[FLIGHT MQTT] ").strip())
+                    elif "SECURITY" in line or "KEY_ROTATION" in line:
+                        log("SECURITY", line.removeprefix("[FLIGHT MQTT] ").removeprefix("SECURITY "))
                     elif "Command" in line or "Invalid" in line or "disconnected" in line.lower():
                         log("PI", line)
                 else:
@@ -216,6 +239,7 @@ def mac_demo(args: argparse.Namespace) -> int:
         raise RuntimeError(f"Missing telemetry CSV: {csv}. Keep it on your Mac; do not commit it")
     if args.frames <= 0 or args.rate_hz <= 0:
         raise RuntimeError("--frames and --rate-hz must both be positive")
+    security_check("mac")
     broker_check(args.broker_host, args.broker_port)
     run_id = f"demo-{int(time.time())}"
     db = ROOT / "ground" / "ingestion" / f"demo_ground_{run_id}.sqlite3"
@@ -274,6 +298,8 @@ def mac_demo(args: argparse.Namespace) -> int:
                         if n == expected or n - last_count >= 26 or (e >= args.min_events and n > last_count):
                             last_count = n
                             log("GROUND", f"Received {n}/{expected} unique samples; {e} link events")
+                elif "SECURITY" in line:
+                    log("SECURITY", line.removeprefix("[GROUND MQTT] ").removeprefix("SECURITY "))
                 elif "Rejected" in line or "Disconnected" in line:
                     log("GROUND", line)
             sim = manager.children["SIM"]

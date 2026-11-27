@@ -3,6 +3,11 @@
 Simulator -> LOCAL Mosquitto -> SQLite -> MQTT downlink -> Mac ground.
 Mac sends application ACKs and read-only commands via MQTT to the same broker.
 Simulated blackout gates the ground-facing topics, not the local MQTT broker.
+
+Security (REQ-SEC-01/02): every ground-facing packet (telemetry, events, command results
+downlinked; ACKs and commands uplinked) is an AES-256-GCM sealed envelope bound to its
+topic, with replay rejection. Uplink commands must also carry a valid Ed25519 ground
+signature. See docs/SECURITY.md.
 """
 from __future__ import annotations
 
@@ -19,6 +24,9 @@ import paho.mqtt.client as mqtt
 from flight.storage.buffer import TelemetryBuffer
 from shared.mqtt_protocol import topics, utc_now, validate_command
 from shared.protocol import TelemetryRecord
+from shared.security import KeyMaterialError, SecurityError, open_channel
+from shared.security.keystore import load_verify_key
+from shared.security.signing import verify_document
 from simulator.link.blackout import BlackoutWindow
 
 
@@ -40,7 +48,20 @@ def main() -> int:
     p.add_argument('--blackout-after', type=float, default=10)
     p.add_argument('--blackout-duration', type=float, default=15)
     p.add_argument('--db', type=Path, default=Path('flight/storage/pi_mqtt_flight.sqlite3'))
+    p.add_argument('--secrets', default=None, help='Key directory (default $G29_SECRETS_DIR or ~/.g29_secrets)')
     args = p.parse_args()
+
+    def on_key_epoch(old: int, new: int) -> None:
+        print(f'[FLIGHT MQTT] KEY_ROTATION link key epoch {old} -> {new}', flush=True)
+
+    try:
+        channel = open_channel('pi01-flight', secrets=args.secrets, on_key_epoch=on_key_epoch)
+        verify_key = load_verify_key(args.secrets)
+    except KeyMaterialError as exc:
+        print(f'[FLIGHT MQTT] SECURITY key material unavailable: {exc}', flush=True)
+        return 2
+    print(f'[FLIGHT MQTT] SECURITY AES-256-GCM link enabled; key epoch {channel.current_epoch} '
+          f'rotates every {channel.rotation_seconds}s; commands require Ed25519 signature', flush=True)
     tm = topics(args.topic_prefix)
     window = BlackoutWindow(args.blackout_after, args.blackout_duration)
     db = TelemetryBuffer(args.db)
@@ -83,14 +104,16 @@ def main() -> int:
             except (ValueError, KeyError, TypeError) as exc:
                 print(f'[FLIGHT MQTT] Invalid telemetry: {exc}', flush=True)
             return
-        try:
-            body = json.loads(msg.payload)
-        except (ValueError, UnicodeDecodeError):
-            return
         with lock:
             # The blackout is a logical ground-radio blackout; nothing uplinked is processed.
             if shared['state'] not in ('ONLINE', 'RECOVERING'):
                 return
+        try:
+            body = channel.open_json(msg.topic, msg.payload)
+        except SecurityError as exc:
+            print(f'[FLIGHT MQTT] SECURITY REJECT topic={msg.topic} reason={exc.reason} | {exc}', flush=True)
+            return
+        with lock:
             if msg.topic == tm['ack']:
                 if not isinstance(body, dict):
                     return
@@ -110,7 +133,8 @@ def main() -> int:
             if msg.topic == tm['command']:
                 command_id = body.get('command_id') if isinstance(body, dict) else None
                 try:
-                    cmd = validate_command(body)
+                    # Signature first: unsigned or forged commands never reach command handling.
+                    cmd = validate_command(verify_document(body, verify_key))
                     if cmd['command_id'] in seen_commands:
                         result = seen_commands[cmd['command_id']]
                     else:
@@ -121,6 +145,7 @@ def main() -> int:
                                 'flight_state': shared['state'],
                                 'telemetry_stored': total, 'telemetry_pending': waiting,
                                 'events_stored': events, 'events_pending': event_waiting,
+                                'security': channel.stats(),
                             }
                         else:
                             details = {'events': latest_events(args.db, 10)}
@@ -133,7 +158,7 @@ def main() -> int:
                 except (ValueError, TypeError) as exc:
                     result = {'command_id': command_id, 'status': 'REJECTED',
                               'reason': str(exc), 'handled_at': utc_now()}
-                c.publish(tm['result'], json.dumps(result), qos=1, retain=False)
+                c.publish(tm['result'], channel.seal_json(tm['result'], result), qos=1, retain=False)
                 print(f"[FLIGHT MQTT] Command {result.get('command_id')}: {result['status']}", flush=True)
 
     client.on_connect = on_connect
@@ -189,14 +214,16 @@ def main() -> int:
                             ids = [row[key] for row in rows]
                             payload = json.dumps({'items': rows}, separators=(',', ':'))
                             inflight[kind] = {'at': now, 'ids': ids}
-                            client.publish(tm[kind], payload, qos=1, retain=False)
+                            client.publish(tm[kind], channel.seal(tm[kind], payload), qos=1, retain=False)
                 if now - last_report >= 5:
                     last_report = now
                     t_total, t_pending = db.counts()
                     e_total, e_pending = db.event_counts()
+                    rejected = sum(channel.rejected.values())
                     print(f'[FLIGHT MQTT] t={elapsed:5.1f}s state={shared["state"]:10s} '
                           f'saved={t_total} pending={t_pending} '
-                          f'events={e_total} events_pending={e_pending}', flush=True)
+                          f'events={e_total} events_pending={e_pending} '
+                          f'sec_rejected={rejected}', flush=True)
     except KeyboardInterrupt:
         print('\n[FLIGHT MQTT] Stopping', flush=True)
     finally:

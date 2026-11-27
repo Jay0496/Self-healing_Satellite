@@ -1,7 +1,7 @@
 """Ground receiver: idempotent telemetry and flight-event ingestion.
 
-Demo only: plain HTTP, no authentication. Bind to 127.0.0.1 for same-device tests.
-Do not expose this receiver to the public Internet.
+POST bodies must be AES-256-GCM sealed envelopes from the Pi (REQ-SEC-01); responses are
+sealed too. Transport is still plain HTTP underneath, so bind to a trusted network only.
 """
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from shared.security import KeyMaterialError, SecurityError, open_channel
 
 
 def utc_now():
@@ -84,12 +86,19 @@ def main():
     parser.add_argument('--host', default='127.0.0.1', help='Bind on a trusted network only')
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--db', type=Path, default=Path('ground/ingestion/received.sqlite3'))
+    parser.add_argument('--secrets', default=None, help='Key directory (default $G29_SECRETS_DIR or ~/.g29_secrets)')
     args = parser.parse_args()
+    try:
+        channel = open_channel('ground-station-http', secrets=args.secrets)
+    except KeyMaterialError as exc:
+        print(f'[GROUND] SECURITY key material unavailable: {exc}', flush=True)
+        return 2
     store = GroundStore(args.db)
 
     class Handler(BaseHTTPRequestHandler):
-        def reply(self, status: int, data: dict):
-            payload = json.dumps(data).encode('utf-8')
+        def reply(self, status: int, data: dict, sealed: bool = False):
+            payload = (channel.seal_json(f'http:{self.path}#ack', data) if sealed
+                       else json.dumps(data).encode('utf-8'))
             self.send_response(status)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(payload)))
@@ -111,7 +120,12 @@ def main():
                 length = int(self.headers.get('Content-Length', '0'))
                 if not 0 < length <= 2_000_000:
                     raise ValueError('Request length invalid')
-                payload = json.loads(self.rfile.read(length))
+                try:
+                    payload = channel.open_json(f'http:{self.path}', self.rfile.read(length))
+                except SecurityError as exc:
+                    print(f'[GROUND] SECURITY REJECT path={self.path} reason={exc.reason}', flush=True)
+                    self.reply(403, {'error': exc.reason})
+                    return
                 if not isinstance(payload, dict):
                     raise ValueError('Request must be a JSON object')
                 if self.path == '/ingest':
@@ -120,14 +134,14 @@ def main():
                         raise ValueError('Expected 1 to 100 records')
                     ids = store.ingest(records)
                     print(f'[GROUND] Accepted telemetry={len(ids)} total_unique={store.count()}', flush=True)
-                    self.reply(200, {'acknowledged_ids': ids})
+                    self.reply(200, {'acknowledged_ids': ids}, sealed=True)
                 else:
                     events = payload.get('events')
                     if not isinstance(events, list) or not 0 < len(events) <= 100:
                         raise ValueError('Expected 1 to 100 events')
                     ids = store.ingest_events(events)
                     print(f'[GROUND] Accepted events={len(ids)} total_unique={store.count_events()}', flush=True)
-                    self.reply(200, {'acknowledged_event_uids': ids})
+                    self.reply(200, {'acknowledged_event_uids': ids}, sealed=True)
             except (ValueError, TypeError, KeyError) as exc:
                 self.reply(400, {'error': str(exc)})
 
@@ -143,4 +157,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

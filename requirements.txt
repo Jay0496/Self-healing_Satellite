@@ -1,0 +1,9 @@
+# Flight (Pi) and ground (Mac) runtime dependencies. Install inside .venv:
+#   python -m pip install -r requirements.txt
+paho-mqtt>=2.1,<3
+numpy>=1.24
+ai-edge-litert>=1.0     # TFLite runtime for the edge anomaly detector (Pi / AI process)
+cryptography>=42        # AES-256-GCM link encryption, HKDF, Ed25519 (docs/SECURITY.md)
+
+# Development / tests
+pytest>=8

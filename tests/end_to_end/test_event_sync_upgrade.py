@@ -28,12 +28,14 @@ class TestEventSync(unittest.TestCase):
     def test_migrates_previous_events_table_without_data_loss(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / 'previous.sqlite3'
-            with sqlite3.connect(path) as raw:
+            raw = sqlite3.connect(path)
+            with raw:  # commits only; close explicitly so Windows can delete the temp file
                 raw.execute('''CREATE TABLE events (
                     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_time TEXT NOT NULL, state TEXT NOT NULL, message TEXT NOT NULL)''')
                 raw.execute('INSERT INTO events(event_time,state,message) VALUES(?,?,?)',
                             ('2026-11-16T18:00:00+00:00', 'BLACKOUT', 'Legacy event'))
+            raw.close()
             db = TelemetryBuffer(path)
             self.assertEqual(db.event_counts(), (1, 1))
             self.assertEqual(db.pending_events()[0]['message'], 'Legacy event')
