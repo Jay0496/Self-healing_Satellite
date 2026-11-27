@@ -2,21 +2,24 @@
 
 Simulator -> local MQTT broker -> collector -> local SQLite -> ground HTTP.
 Ground blackout does not interrupt local MQTT, storage, or Pi remote access.
+Every HTTP request body and ground response is an AES-256-GCM sealed envelope bound to the
+endpoint path, with replay rejection (REQ-SEC-01). See docs/SECURITY.md.
 """
 from __future__ import annotations
 
 import argparse
-import json
 import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from pathlib import Path
 
 import paho.mqtt.client as mqtt
 
 from flight.storage.buffer import TelemetryBuffer
 from shared.protocol import TelemetryRecord
+from shared.security import KeyMaterialError, open_channel
 from simulator.link.blackout import BlackoutWindow
 
 
@@ -28,7 +31,13 @@ def main():
     parser.add_argument('--blackout-after', type=float, default=20.0)
     parser.add_argument('--blackout-duration', type=float, default=60.0)
     parser.add_argument('--db', type=Path, default=Path('flight/storage/telemetry_buffer.sqlite3'))
+    parser.add_argument('--secrets', default=None, help='Key directory (default $G29_SECRETS_DIR or ~/.g29_secrets)')
     args = parser.parse_args()
+    try:
+        channel = open_channel('pi01-flight-http', secrets=args.secrets)
+    except KeyMaterialError as exc:
+        print(f'[FLIGHT] SECURITY key material unavailable: {exc}', flush=True)
+        return 2
     events_url = args.ground_url.rsplit('/', 1)[0] + '/ingest-events'
     window = BlackoutWindow(args.blackout_after, args.blackout_duration)
     db = TelemetryBuffer(args.db)
@@ -58,11 +67,14 @@ def main():
 
     def submit_batch(url: str, key: str, rows: list[dict],
                      ack_key: str, id_key: str) -> list[str]:
-        payload = json.dumps({key: rows}).encode('utf-8')
+        path = urlsplit(url).path
+        payload = channel.seal_json(f'http:{path}', {key: rows})
         req = urllib.request.Request(url, payload,
                                      {'Content-Type': 'application/json'}, method='POST')
         with urllib.request.urlopen(req, timeout=2.5) as response:
-            body = json.load(response)
+            body = channel.open_json(f'http:{path}#ack', response.read(4_000_000))
+        if not isinstance(body, dict):
+            raise ValueError('Invalid acknowledgement from ground')
         acknowledged = body.get(ack_key, [])
         expected = {row[id_key] for row in rows}
         if not isinstance(acknowledged, list) or not all(

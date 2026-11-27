@@ -1,4 +1,9 @@
-"""Mac ground MQTT receiver. Stores telemetry/events before returning application ACKs."""
+"""Mac ground MQTT receiver. Stores telemetry/events before returning application ACKs.
+
+Downlink batches must be valid AES-256-GCM envelopes from the Pi (tampered, replayed,
+unencrypted or wrong-topic packets are rejected and never stored or ACKed). ACKs are
+sealed the same way. See docs/SECURITY.md.
+"""
 from __future__ import annotations
 
 import argparse
@@ -12,6 +17,7 @@ import paho.mqtt.client as mqtt
 
 from ground.ingestion.receiver import GroundStore
 from shared.mqtt_protocol import topics
+from shared.security import KeyMaterialError, SecurityError, open_channel
 
 
 def main() -> int:
@@ -20,8 +26,14 @@ def main() -> int:
     p.add_argument('--broker-port', type=int, default=1883)
     p.add_argument('--topic-prefix', default='capstone/g29/pi01')
     p.add_argument('--db', type=Path, default=Path('ground/ingestion/mac_mqtt_ground.sqlite3'))
+    p.add_argument('--secrets', default=None, help='Key directory (default $G29_SECRETS_DIR or ~/.g29_secrets)')
     args = p.parse_args()
     tm = topics(args.topic_prefix)
+    try:
+        channel = open_channel('ground-station', secrets=args.secrets)
+    except KeyMaterialError as exc:
+        print(f'[GROUND MQTT] SECURITY key material unavailable: {exc}', flush=True)
+        return 2
     store = GroundStore(args.db)
     client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
                          client_id=f'g29-ground-{uuid4().hex[:8]}')
@@ -44,7 +56,11 @@ def main() -> int:
         if len(msg.payload) > 2_000_000:
             return
         try:
-            payload = json.loads(msg.payload)
+            payload = channel.open_json(msg.topic, msg.payload)
+        except SecurityError as exc:
+            print(f'[GROUND MQTT] SECURITY REJECT topic={msg.topic} reason={exc.reason} | {exc}', flush=True)
+            return
+        try:
             rows = payload.get('items') if isinstance(payload, dict) else None
             if not isinstance(rows, list) or not 1 <= len(rows) <= 100:
                 raise ValueError('Invalid downlink batch')
@@ -57,10 +73,11 @@ def main() -> int:
             else:
                 return
             # ACK after SQLite transaction has committed. Duplicates remain idempotent.
-            c.publish(tm['ack'], json.dumps({'kind': kind, 'ids': acknowledged}), qos=1, retain=False)
+            c.publish(tm['ack'], channel.seal_json(tm['ack'], {'kind': kind, 'ids': acknowledged}),
+                      qos=1, retain=False)
             print(f'[GROUND MQTT] Saved {kind} batch={len(rows)} '
                   f'telemetry_unique={store.count()} events_unique={store.count_events()}', flush=True)
-        except (ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
+        except (ValueError, KeyError, TypeError) as exc:
             print(f'[GROUND MQTT] Rejected batch: {exc}', flush=True)
 
     client.on_connect = on_connect
@@ -80,6 +97,7 @@ def main() -> int:
     except KeyboardInterrupt:
         print('\n[GROUND MQTT] Stopping', flush=True)
     finally:
+        print(f'[GROUND MQTT] SECURITY summary {json.dumps(channel.stats())}', flush=True)
         client.disconnect()
         client.loop_stop()
         store.db.close()

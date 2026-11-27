@@ -1,4 +1,8 @@
-"""Ground-side read-only MQTT telecommand CLI. No arbitrary code execution."""
+"""Ground-side read-only MQTT telecommand CLI. No arbitrary code execution.
+
+Each command is Ed25519-signed with the ground signing key, then sealed with AES-256-GCM
+for the uplink topic. The Pi's reply is opened and authenticated the same way.
+"""
 from __future__ import annotations
 
 import argparse
@@ -10,6 +14,9 @@ from uuid import uuid4
 import paho.mqtt.client as mqtt
 
 from shared.mqtt_protocol import ALLOWED_COMMANDS, topics
+from shared.security import KeyMaterialError, SecurityError, open_channel
+from shared.security.keystore import load_signing_key
+from shared.security.signing import sign_document
 
 
 def main() -> int:
@@ -19,8 +26,16 @@ def main() -> int:
     p.add_argument('--topic-prefix', default='capstone/g29/pi01')
     p.add_argument('--command', choices=sorted(ALLOWED_COMMANDS), default='GET_STATUS')
     p.add_argument('--timeout', type=float, default=15)
+    p.add_argument('--operator', default='ground-operator', help='Operator name recorded in the command')
+    p.add_argument('--secrets', default=None, help='Key directory (default $G29_SECRETS_DIR or ~/.g29_secrets)')
     args = p.parse_args()
     tm = topics(args.topic_prefix)
+    try:
+        channel = open_channel('ground-command-cli', secrets=args.secrets)
+        signing_key = load_signing_key(args.secrets)
+    except KeyMaterialError as exc:
+        print(f'[GROUND COMMAND] SECURITY key material unavailable: {exc}', flush=True)
+        return 2
     cid = uuid4().hex
     done = threading.Event()
     result = {}
@@ -35,19 +50,21 @@ def main() -> int:
             print(f'[GROUND COMMAND] Broker connection rejected: {rc}', flush=True)
 
     def on_subscribe(c, userdata, mid, reason_codes, properties):
-        command = {'command_id': cid, 'type': args.command,
-                   'expires_at': time.time() + min(args.timeout, 30)}
-        c.publish(tm['command'], json.dumps(command), qos=1, retain=False)
-        print(f'[GROUND COMMAND] Sent {args.command}, id={cid}', flush=True)
+        command = sign_document({'command_id': cid, 'type': args.command,
+                                 'expires_at': time.time() + min(args.timeout, 30),
+                                 'issued_by': args.operator}, signing_key)
+        c.publish(tm['command'], channel.seal_json(tm['command'], command), qos=1, retain=False)
+        print(f'[GROUND COMMAND] Sent signed+encrypted {args.command}, id={cid}', flush=True)
 
     def on_message(c, userdata, msg):
         try:
-            data = json.loads(msg.payload)
-            if isinstance(data, dict) and data.get('command_id') == cid:
-                result.update(data)
-                done.set()
-        except (ValueError, UnicodeDecodeError):
-            pass
+            data = channel.open_json(msg.topic, msg.payload)
+        except SecurityError as exc:
+            print(f'[GROUND COMMAND] SECURITY REJECT reply reason={exc.reason}', flush=True)
+            return
+        if isinstance(data, dict) and data.get('command_id') == cid:
+            result.update(data)
+            done.set()
 
     client.on_connect = on_connect
     client.on_subscribe = on_subscribe
