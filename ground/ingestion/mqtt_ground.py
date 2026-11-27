@@ -3,6 +3,10 @@
 Downlink batches must be valid AES-256-GCM envelopes from the Pi (tampered, replayed,
 unencrypted or wrong-topic packets are rejected and never stored or ACKed). ACKs are
 sealed the same way. See docs/SECURITY.md.
+
+The Pi's hash-chained audit trail arrives on downlink/audit and is re-verified link by link
+(ground/storage/audit_store.py). Ground-side security rejections and audit integrity alerts
+are recorded in the ground operator audit chain. See docs/AUDIT_AND_MONITORING.md.
 """
 from __future__ import annotations
 
@@ -16,6 +20,8 @@ from uuid import uuid4
 import paho.mqtt.client as mqtt
 
 from ground.ingestion.receiver import GroundStore
+from ground.storage.audit_store import GroundAuditStore
+from shared.audit import AuditLog, RateLimitedAudit
 from shared.mqtt_protocol import topics
 from shared.security import KeyMaterialError, SecurityError, open_channel
 
@@ -27,7 +33,11 @@ def main() -> int:
     p.add_argument('--topic-prefix', default='capstone/g29/pi01')
     p.add_argument('--db', type=Path, default=Path('ground/ingestion/mac_mqtt_ground.sqlite3'))
     p.add_argument('--secrets', default=None, help='Key directory (default $G29_SECRETS_DIR or ~/.g29_secrets)')
+    p.add_argument('--operator-audit', type=Path, default=Path('ground/storage/operator_audit.sqlite3'),
+                   help='Ground operator audit chain (security alerts, commands sent)')
     args = p.parse_args()
+    operator_audit = AuditLog(args.operator_audit, chain_prefix='ground', actor='ground-receiver')
+    security_audit = RateLimitedAudit(operator_audit, per_minute=20)
     tm = topics(args.topic_prefix)
     try:
         channel = open_channel('ground-station', secrets=args.secrets)
@@ -35,6 +45,7 @@ def main() -> int:
         print(f'[GROUND MQTT] SECURITY key material unavailable: {exc}', flush=True)
         return 2
     store = GroundStore(args.db)
+    audit_store = GroundAuditStore(args.db)
     client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
                          client_id=f'g29-ground-{uuid4().hex[:8]}')
     ready = threading.Event()
@@ -45,6 +56,7 @@ def main() -> int:
             return
         c.subscribe(tm['telemetry'], qos=1)
         c.subscribe(tm['events'], qos=1)
+        c.subscribe(tm['audit'], qos=1)
         ready.set()
         print(f'[GROUND MQTT] Subscribed to {args.topic_prefix}/downlink/#', flush=True)
 
@@ -59,6 +71,7 @@ def main() -> int:
             payload = channel.open_json(msg.topic, msg.payload)
         except SecurityError as exc:
             print(f'[GROUND MQTT] SECURITY REJECT topic={msg.topic} reason={exc.reason} | {exc}', flush=True)
+            security_audit.append('SECURITY_REJECT', {'topic': msg.topic, 'reason': exc.reason})
             return
         try:
             rows = payload.get('items') if isinstance(payload, dict) else None
@@ -70,13 +83,21 @@ def main() -> int:
             elif msg.topic == tm['events']:
                 acknowledged = store.ingest_events(rows)
                 kind = 'events'
+            elif msg.topic == tm['audit']:
+                acknowledged = audit_store.ingest(rows)
+                kind = 'audit'
+                while audit_store.alerts:
+                    alert = audit_store.alerts.pop(0)
+                    print(f'[GROUND MQTT] AUDIT INTEGRITY ALERT {alert}', flush=True)
+                    operator_audit.append('AUDIT_INTEGRITY_ALERT', {'alert': alert})
             else:
                 return
             # ACK after SQLite transaction has committed. Duplicates remain idempotent.
             c.publish(tm['ack'], channel.seal_json(tm['ack'], {'kind': kind, 'ids': acknowledged}),
                       qos=1, retain=False)
             print(f'[GROUND MQTT] Saved {kind} batch={len(rows)} '
-                  f'telemetry_unique={store.count()} events_unique={store.count_events()}', flush=True)
+                  f'telemetry_unique={store.count()} events_unique={store.count_events()} '
+                  f'audit_unique={audit_store.count()}', flush=True)
         except (ValueError, KeyError, TypeError) as exc:
             print(f'[GROUND MQTT] Rejected batch: {exc}', flush=True)
 
@@ -98,6 +119,13 @@ def main() -> int:
         print('\n[GROUND MQTT] Stopping', flush=True)
     finally:
         print(f'[GROUND MQTT] SECURITY summary {json.dumps(channel.stats())}', flush=True)
+        for chain in audit_store.chains():
+            result = audit_store.verify_chain(chain)
+            print(f"[GROUND MQTT] AUDIT chain {chain}: {result['entries']} entries, "
+                  f"{'INTACT' if result['ok'] else 'BROKEN at seq ' + str(result['first_bad_seq'])}", flush=True)
+        security_audit.flush()
+        operator_audit.close()
+        audit_store.close()
         client.disconnect()
         client.loop_stop()
         store.db.close()

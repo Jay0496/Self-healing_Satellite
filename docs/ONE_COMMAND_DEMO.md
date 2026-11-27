@@ -77,8 +77,13 @@ ground commands are Ed25519-signed. `[SECURITY]` lines show rejections and key r
 To demonstrate attacks being rejected, run `python scripts/security_attack_demo.py
 --broker-host <Pi address>` on the Mac while the link is ONLINE.
 
-**Limitations:** AI decisions currently print on the Pi only; no AI-event downlink,
-FSM-controlled recovery or physical RF link is included. The script consolidates
+AI anomaly decisions, link states, commands, security rejections, key rotations and
+resource samples are recorded in a SHA-256 hash-chained audit log, delivered to ground
+through the same blackout store-and-forward path, and verified at the end of the Mac run
+(`[AUDIT] Chain … INTACT`). Inspect it with `python -m ground.storage.audit_cli --db <ground
+SQLite> search`. See [AUDIT_AND_MONITORING.md](AUDIT_AND_MONITORING.md).
+
+**Limitations:** no FSM-controlled recovery or physical RF link is included. The script consolidates
 terminal output but does not implement those missing features.
 
 ## Troubleshooting

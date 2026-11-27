@@ -122,6 +122,40 @@ def database_counts(path: Path, *, pi: bool = False) -> tuple[int, int, int]:
         return 0, 0, 0
 
 
+def audit_report(path: Path, *, ground: bool) -> bool | None:
+    """Re-verify the hash-chained audit trail stored in a demo database (REQ-AUD-01)."""
+    if not path.is_file():
+        return None
+    try:
+        if ground:
+            from ground.storage.audit_store import GroundAuditStore
+            store = GroundAuditStore(path)
+            try:
+                results = [store.verify_chain(c) for c in store.chains()]
+            finally:
+                store.close()
+        else:
+            from shared.audit import AuditLog
+            log_ = AuditLog(path)
+            try:
+                results = [log_.verify()]
+                results[0]["entries"], pending = log_.counts()
+                results[0]["pending"] = pending
+            finally:
+                log_.close()
+    except sqlite3.Error as exc:
+        log("AUDIT", f"Could not verify audit chain: {exc}")
+        return False
+    if not results:
+        log("AUDIT", "No audit entries")
+        return None
+    for r in results:
+        state = "INTACT" if r["ok"] else f"BROKEN at seq {r['first_bad_seq']} ({r['reason']})"
+        extra = f", pending downlink={r['pending']}" if "pending" in r else ""
+        log("AUDIT", f"Chain {r['chain_id']}: {r['entries']} entries, {state}{extra}, head={r['head'][:16]}")
+    return all(r["ok"] for r in results)
+
+
 def ground_report(path: Path, expected: int, min_events: int) -> bool:
     with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
         rows = db.execute("SELECT payload FROM telemetry").fetchall()
@@ -133,6 +167,10 @@ def ground_report(path: Path, expected: int, min_events: int) -> bool:
     log("GROUND FINAL", f"Telemetry: {len(records)}/{expected}; injected samples: {len(faults)}")
     log("GROUND FINAL", f"Link events: {' -> '.join(event_states) or 'none'}")
     log("GROUND FINAL", f"SQLite: {path.relative_to(ROOT)}")
+    audit_ok = audit_report(path, ground=True)
+    if audit_ok is False:
+        log("WARNING", "Audit chain verification FAILED on ground")
+        return False
     if len(records) != expected or len(event_states) < min_events:
         log("WARNING", "Run incomplete: check Pi collector, MQTT connectivity and downlink ACKs")
         return False
@@ -160,7 +198,8 @@ def pi_demo(args: argparse.Namespace) -> int:
                           "--blackout-after", str(args.blackout_after),
                           "--blackout-duration", str(args.blackout_duration), "--db", str(filename))
         supervisor.launch("AI", "flight.communications.mqtt_ai_detector",
-                          "--mqtt-host", args.mqtt_host, "--mqtt-port", str(args.mqtt_port))
+                          "--mqtt-host", args.mqtt_host, "--mqtt-port", str(args.mqtt_port),
+                          "--db", str(filename))
         started = time.monotonic()
         while True:
             item = supervisor.next()
@@ -179,6 +218,8 @@ def pi_demo(args: argparse.Namespace) -> int:
                             if bucket != last_status_bucket:
                                 last_status_bucket = bucket
                                 log("PI STORAGE", line.removeprefix("[FLIGHT MQTT] ").strip())
+                    elif "RESOURCE" in line or "AUDIT" in line:
+                        log("MONITOR", line.removeprefix("[FLIGHT MQTT] "))
                     elif "SECURITY" in line or "KEY_ROTATION" in line:
                         log("SECURITY", line.removeprefix("[FLIGHT MQTT] ").removeprefix("SECURITY "))
                     elif "Command" in line or "Invalid" in line or "disconnected" in line.lower():
@@ -228,6 +269,7 @@ def pi_demo(args: argparse.Namespace) -> int:
             log("PI FINAL", f"AI alerts={ai_alerts}; peak score={peak_score:.4f}")
             log("PI FINAL", f"Last AI alert: {latest_ai}")
         log("PI FINAL", f"SQLite: {filename.relative_to(ROOT)}")
+        audit_report(filename, ground=False)
     return 0
 
 
@@ -300,6 +342,8 @@ def mac_demo(args: argparse.Namespace) -> int:
                             log("GROUND", f"Received {n}/{expected} unique samples; {e} link events")
                 elif "SECURITY" in line:
                     log("SECURITY", line.removeprefix("[GROUND MQTT] ").removeprefix("SECURITY "))
+                elif "AUDIT INTEGRITY" in line:
+                    log("AUDIT", line.removeprefix("[GROUND MQTT] "))
                 elif "Rejected" in line or "Disconnected" in line:
                     log("GROUND", line)
             sim = manager.children["SIM"]

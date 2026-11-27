@@ -24,7 +24,9 @@ This monorepo is organized around the system boundary where each component runs:
 Install dependencies with `python -m pip install -r requirements.txt` and provision link keys
 once with `python -m shared.security.keytool init` (keys live in `~/.g29_secrets`, never in the
 repo). All space-ground packets are AES-256-GCM encrypted, replay-protected, and ground commands
-are Ed25519-signed; see [docs/SECURITY.md](docs/SECURITY.md). Demo instructions:
+are Ed25519-signed; see [docs/SECURITY.md](docs/SECURITY.md). Onboard decisions and link/security
+events form a tamper-evident SHA-256 audit chain that survives blackouts and is verified on ground,
+alongside edge resource monitoring; see [docs/AUDIT_AND_MONITORING.md](docs/AUDIT_AND_MONITORING.md). Demo instructions:
 [docs/ONE_COMMAND_DEMO.md](docs/ONE_COMMAND_DEMO.md). Run tests with `python -m pytest`.
 
 The directory READMEs describe intended responsibilities. A documented directory is a planned boundary and does not necessarily contain an implemented component yet.
