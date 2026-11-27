@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import time
+import json
+import uuid
+import os
+import hmac
+import hashlib
 from dataclasses import dataclass
 
 from shared.protocol import TelemetryRecord
@@ -104,6 +109,63 @@ class MqttTelemetryPublisher:
             is_published = getattr(info, "is_published", None)
             if is_published is not None and not is_published():
                 raise MqttPublishError(f"MQTT publish to {topic} timed out")
+
+    def publish_hardware_fault(self, sensor: str, fault: str) -> str:
+        """Send an authenticated physical sensor fault request."""
+
+        from .hardware_faults import validate_hardware_fault
+
+        if not validate_hardware_fault(sensor, fault):
+            raise ValueError("Unsupported hardware fault")
+
+        secret = os.environ.get("CAPSTONE_FAULT_KEY")
+
+        if not secret or len(secret) < 32:
+            raise RuntimeError("Hardware fault key is missing or too short")
+
+        request = {
+            "command_id": str(uuid.uuid4()),
+            "sensor": sensor,
+            "fault": fault,
+            "expires_at": time.time() + 30,
+        }
+
+        payload = json.dumps(
+            request, sort_keys=True, separators=(",", ":")
+        )
+
+        signature = hmac.new(
+            secret.encode(),
+            payload.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+
+        message = json.dumps({
+            "request": request,
+            "signature": signature,
+        })
+
+        info = self.client.publish(
+            "satellite/flight/hardware-fault/request",
+            payload=message,
+            qos=1,
+            retain=False,
+        )
+
+        if info.rc != 0:
+            raise MqttPublishError("Hardware fault publication failed")
+
+        info.wait_for_publish(
+            timeout=self.config.publish_timeout_seconds
+        )
+
+        if not info.is_published():
+            raise MqttPublishError("Hardware fault publication timed out")
+
+        print(f"[HARDWARE FAULT REQUEST] {sensor}/{fault}")
+
+        return request["command_id"]
+
 
     def close(self) -> None:
         disconnect = getattr(self.client, "disconnect", None)
