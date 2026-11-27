@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -13,6 +14,10 @@ from pathlib import Path
 from .generation import GeneratorConfig, TelemetryGenerator
 from .mqtt import MqttConfig, create_paho_publisher
 from .pipeline import select_records
+from .hardware_faults import (
+    select_hardware_fault,
+    corresponding_hardware_fault,
+)
 
 
 def _default_csv_path() -> Path:
@@ -56,6 +61,22 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--mqtt-client-id", default=os.getenv("SIMULATOR_MQTT_CLIENT_ID", "satellite-simulator"))
     parser.add_argument("--mqtt-username", default=os.getenv("SIMULATOR_MQTT_USERNAME"))
     parser.add_argument("--mqtt-password", default=os.getenv("SIMULATOR_MQTT_PASSWORD"))
+    parser.add_argument(
+        "--hardware-faults",
+        action="store_true",
+        help="Enable physical sensor fault testing on the Pi.",
+    )
+    parser.add_argument(
+        "--hardware-fault-tick",
+        type=int,
+        default=15,
+        help="Frame number at which to inject a physical fault.",
+    )
+    parser.add_argument(
+        "--match-hardware-faults",
+        action="store_true",
+        help="Mirror supported simulated faults on physical sensors.",
+    )
     return parser
 
 
@@ -80,6 +101,25 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(f"UHF CSV does not exist: {args.uhf_csv}")
         if args.rate_hz <= 0 or not math.isfinite(args.rate_hz):
             raise ValueError("--rate-hz must be finite and positive")
+        if args.hardware_faults and args.match_hardware_faults:
+            raise ValueError("Select only one hardware fault mode")
+
+        if args.hardware_faults or args.match_hardware_faults:
+            if args.dry_run:
+                raise ValueError(
+                    "Hardware faults cannot run in dry-run mode"
+                )
+            if args.hardware_fault_tick < 0:
+                raise ValueError(
+                    "Hardware fault tick must be non-negative"
+                )
+            if len(os.getenv("CAPSTONE_FAULT_KEY", "")) < 32:
+                raise ValueError(
+                    "Hardware fault key is missing or too short"
+                )
+
+        hardware_rng = random.Random(args.seed + 2001)
+
         count = _frame_count(args)
         selected_signals = (
             {signal.strip() for signal in args.signals.split(",") if signal.strip()}
@@ -117,12 +157,65 @@ def main(argv: list[str] | None = None) -> int:
         publisher.connect()
         started = time.monotonic()
         published = 0
+        requested_sensors = set()
         try:
             for frame in generator.frames(count):
                 due = started + frame.tick / args.rate_hz
                 delay = due - time.monotonic()
                 if delay > 0:
                     time.sleep(delay)
+                if (
+                    args.hardware_faults
+                    and frame.tick == args.hardware_fault_tick
+                ):
+                    selected = select_hardware_fault(hardware_rng)
+
+                    publisher.publish_hardware_fault(
+                        selected["sensor"],
+                        selected["fault"],
+                    )
+
+                if args.match_hardware_faults:
+                    for record in frame.records:
+
+                        if record.provenance != "fault_injected":
+                            continue
+
+                        for tag in record.transform_id.split("|"):
+
+                            if not (
+                                tag.startswith("fault_")
+                                and tag.endswith("_v1")
+                            ):
+                                continue
+
+                            kind = tag[6:-3]
+
+                            selected = corresponding_hardware_fault(
+                                record.signal, kind
+                            )
+
+                            if selected is None:
+                                continue
+
+                            sensor = selected["sensor"]
+                            fault = selected["fault"]
+
+                            if sensor in requested_sensors:
+                                continue
+
+                            publisher.publish_hardware_fault(
+                                sensor, fault
+                            )
+
+                            requested_sensors.add(sensor)
+
+                            print(
+                                f"[MATCHED FAULT] "
+                                f"{record.signal}/{kind} -> "
+                                f"{sensor}/{fault}"
+                            )
+
                 for record in select_records(frame, selected_signals):
                     publisher.publish(record)
                     published += 1
